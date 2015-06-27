@@ -25,12 +25,28 @@ func parseProgram(col *goquery.Selection, weekday time.Weekday, prev *timetable.
 	if 4 >= h {
 		weekday = (weekday + 1) % 7
 	}
-
 	nextDuration := internal.WaitTimeToNextOA(now, h, m, weekday)
+
+	title := col.Find("div.title-p")
+	url, _ := title.Find("a").Attr("href")
+
 	prog := &timetable.Program{
-		Title:  strings.TrimSpace(col.Find("div.title-p").Text()),
+		Title:  strings.TrimSpace(title.Text()),
 		NextOA: now.Add(nextDuration),
+
+		URL: strings.TrimSpace(url),
 	}
+
+	col.Find("div.rp").Children().Each(func(_ int, s *goquery.Selection) {
+		switch s.Nodes[0].DataAtom {
+		case atom.A:
+			href, _ := s.Attr("href")
+			href = strings.TrimSpace(href)
+			if strings.HasPrefix(href, "mailto:") {
+				prog.MailAddr = href[7:]
+			}
+		}
+	})
 
 	val, ok := col.Attr("class")
 	switch {
