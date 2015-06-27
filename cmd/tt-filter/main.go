@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 
@@ -10,11 +11,13 @@ import (
 )
 
 var (
-	fname string
+	fname    string
+	cronTmpl string
 )
 
 func init() {
 	flag.StringVar(&fname, "input", "", "query.json")
+	flag.StringVar(&cronTmpl, "cron", "{{.MailAddr}}", "in text/template format")
 	flag.Parse()
 }
 
@@ -46,7 +49,7 @@ func main() {
 
 	for prog != nil {
 		if filter.Match(prog) {
-			log.Println(prog)
+			fmt.Println(prog.Cron(cronTmpl))
 		}
 
 		prog = prog.Next
