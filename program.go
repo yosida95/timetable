@@ -12,6 +12,10 @@ type Program struct {
 	URL      string
 	MailAddr string
 
+	IsFirst  bool
+	IsRepeat bool
+	IsLive   bool
+
 	Prev *Program
 	Next *Program
 }

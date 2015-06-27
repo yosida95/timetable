@@ -32,6 +32,16 @@ func parseProgram(col *goquery.Selection, weekday time.Weekday, prev *timetable.
 		NextOA: now.Add(nextDuration),
 	}
 
+	val, ok := col.Attr("class")
+	switch {
+	case !ok:
+		prog.IsRepeat = true
+	case strings.Contains(val, "bg-l"):
+		prog.IsLive = true
+	case strings.Contains(val, "bg-f"):
+		prog.IsFirst = true
+	}
+
 	if prev != nil && prev.NextOA.Before(prog.NextOA) {
 		prog.Prev = prev
 		prev.Duration = prog.NextOA.Sub(prev.NextOA)
