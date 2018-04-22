@@ -1,11 +1,13 @@
 package agqr
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/yosida95/timetable"
@@ -13,134 +15,173 @@ import (
 	"golang.org/x/net/html/atom"
 )
 
-const (
-	TIMETABLE_URL = "http://www.agqr.jp/timetable/streaming.php"
-)
+const TIMETABLE_URL = "http://www.agqr.jp/timetable/streaming.html"
+const START_OF_DAY = 6
 
-func parseProgram(col *goquery.Selection, weekday time.Weekday, prev *timetable.Program, now time.Time) (*timetable.Program, error) {
-	h, m, err := internal.ParseTimeColonSeparated(col.Find("div.time").Text())
+func parseTimetable(body io.Reader) (*timetable.Program, error) {
+	doc, err := goquery.NewDocumentFromReader(body)
 	if err != nil {
 		return nil, err
 	}
-	if 4 >= h {
-		weekday = (weekday + 1) % 7
-	}
-	nextDuration := internal.WaitTimeToNextOA(now, h, m, weekday)
 
-	title := col.Find("div.title-p")
-	url, _ := title.Find("a").Attr("href")
+	today := time.Now()
+	table := doc.Find("table.timetb-ag").First()
 
-	prog := &timetable.Program{
-		Title:  strings.TrimSpace(title.Text()),
-		NextOA: now.Add(nextDuration),
+	var root *timetable.Program
+	weekdays := make([]*timetable.Program, 7)
+	table.Find("thead td").EachWithBreak(func(i int, row *goquery.Selection) bool {
+		if i > 6 {
+			err = errors.New("excess columns")
+			return false
+		}
 
-		URL: strings.TrimSpace(url),
-	}
+		date := row.Text()
+		m, lerr := strconv.Atoi(date[0:2])
+		if lerr != nil {
+			err = lerr
+			return false
+		}
+		d, lerr := strconv.Atoi(date[3:5])
+		if lerr != nil {
+			err = lerr
+			return false
+		}
+		y := today.Year()
+		if m == 12 && today.Month() == 1 {
+			y -= 1
+		} else if m == 1 && today.Month() == 12 {
+			y += 1
+		}
 
-	col.Find("div.rp").Children().Each(func(_ int, s *goquery.Selection) {
-		switch s.Nodes[0].DataAtom {
-		case atom.A:
-			href, _ := s.Attr("href")
-			href = strings.TrimSpace(href)
-			if strings.HasPrefix(href, "mailto:") {
-				prog.MailAddr = href[7:]
+		next := &timetable.Program{
+			NextOA: time.Date(y, time.Month(m), d, START_OF_DAY, 0, 0, 0, today.Location()),
+		}
+		weekdays[i] = next
+		if i == 0 {
+			root = next
+		} else {
+			prev := weekdays[i-1]
+			if next.NextOA.After(prev.NextOA) {
+				prev.Next = next
+				next.Prev = prev
+			} else {
+				root = next
 			}
 		}
+		return true
 	})
-
-	val, ok := col.Attr("class")
-	switch {
-	case !ok:
-		prog.IsRepeat = true
-	case strings.Contains(val, "bg-l"):
-		prog.IsLive = true
-	case strings.Contains(val, "bg-f"):
-		prog.IsFirst = true
-	}
-
-	if prev != nil && prev.NextOA.Before(prog.NextOA) {
-		prog.Prev = prev
-		prev.Duration = prog.NextOA.Sub(prev.NextOA)
-		prev.Next = prog
-	} else if prev != nil {
-		prev.Duration = prog.NextOA.Sub(prev.NextOA.Add(-7 * 24 * time.Hour))
-	}
-
-	return prog, nil
-}
-
-func parseTimetable(body io.Reader) (root *timetable.Program, err error) {
-	doc, err := goquery.NewDocumentFromReader(body)
 	if err != nil {
-		return
+		return nil, err
+	}
+	if top := weekdays[0]; root != top {
+		prev := weekdays[6]
+		prev.Next = top
+		top.Prev = prev
 	}
 
-	now := time.Now().Truncate(time.Minute)
-	var (
-		table  [14]*timetable.Program
-		offset [7]int
-	)
-	doc.Find("table.timetb-ag tbody tr").Each(func(_ int, row *goquery.Selection) {
-		i := 0
-		row.Children().EachWithBreak(func(_ int, col *goquery.Selection) bool {
-			node := col.Nodes[0]
-			switch node.DataAtom {
-			case atom.Td:
-				for ; offset[i] > 0; i++ {
-					if i >= 6 {
-						return false
-					}
+	cursor := make([]int, 7)
+	indices := make([]int, 0, 7)
+	table.Find("tbody tr").EachWithBreak(func(_ int, row *goquery.Selection) bool {
+		min := cursor[0]
+		indices = indices[:0]
+		indices = append(indices, 0)
+		for i := 1; i < 7; i++ {
+			if x := cursor[i]; x <= min {
+				if x < min {
+					min = x
+					indices = indices[:0]
+				}
+				indices = append(indices, i)
+			}
+		}
+
+		var hour int
+		var oclock bool
+		row.Children().EachWithBreak(func(j int, row *goquery.Selection) bool {
+			if j > 7 {
+				err = errors.New("excess columns")
+				return false
+			}
+			switch row.Get(0).DataAtom {
+			case atom.Th:
+				if j > 0 {
+					err = errors.New("unexpected <th>")
+					return false
 				}
 
-				if rowspanStr, ok := col.Attr("rowspan"); ok {
-					offset[i], err = strconv.Atoi(strings.TrimSpace(rowspanStr))
-					if err != nil {
-						return false
-					}
-				}
-
-				weekday := time.Weekday((i + 1) % 7)
-				firstI := i * 2
-				lastI := firstI + 1
-
-				prev := table[lastI]
-				table[lastI], err = parseProgram(col, weekday, prev, now)
+				hour, err = strconv.Atoi(row.Text())
 				if err != nil {
 					return false
 				}
-				if table[firstI] == nil {
-					table[firstI] = table[lastI]
+				oclock = true
+			case atom.Td:
+				var index int
+				if oclock {
+					index = indices[j-1]
+				} else {
+					index = indices[j]
 				}
 
-				if root == nil {
-					root = table[firstI]
-				} else if root.NextOA.After(table[lastI].NextOA) {
-					root = table[lastI]
+				var span int
+				span, err = strconv.Atoi(row.AttrOr("rowspan", "1"))
+				if err != nil {
+					return false
 				}
+				cursor[index] += span
 
-				i++
+				prev := weekdays[index]
+				var prog *timetable.Program
+				if prev.Duration == 0 {
+					prog = prev
+				} else {
+					prog = &timetable.Program{
+						NextOA: prev.NextOA.Add(prev.Duration),
+						Prev:   prev,
+					}
+					if prev.Next != nil {
+						prev.Next.Prev = prog
+						prog.Next = prev.Next
+					}
+					prev.Next = prog
+					weekdays[index] = prog
+				}
+				prog.Title = strings.TrimFunc(row.Find("div.title-p").Text(), unicode.IsSpace)
+				prog.Duration = time.Duration(span) * time.Minute
+				prog.IsRepeat = row.HasClass("bg-repeat")
+				prog.IsFirst = !prog.IsRepeat
+				prog.IsLive = row.HasClass("bg-l")
+				row.Find("a").Each(func(_ int, a *goquery.Selection) {
+					href, ok := a.Attr("href")
+					if !ok {
+						return
+					}
+					if strings.HasPrefix(href, "mailto:") {
+						prog.MailAddr = href[7:]
+					} else {
+						prog.URL = href
+					}
+				})
+
+				if oclock && (prog.NextOA.Hour() != hour || prog.NextOA.Minute() != 0) {
+					err = errors.New("out of sync")
+					return false
+				}
+			default:
+				err = errors.New("unexpected tag")
+				return false
 			}
 			return true
 		})
-		for i := 0; i < 7; i++ {
-			if offset[i] > 0 {
-				offset[i]--
-			}
+		if err != nil {
+			return false
 		}
+		return true
 	})
-
-	for i := 1; i < 15; i += 2 {
-		prev := table[i]
-		next := table[(i+1)%14]
-
-		if prev.NextOA.Before(next.NextOA) {
-			prev.Duration = next.NextOA.Sub(prev.NextOA)
-			prev.Next = next
-			next.Prev = prev
-		}
+	if err != nil {
+		return nil, err
 	}
 
-	return
+	return root, nil
 }
 
 func BuildTimetable() (*timetable.Program, error) {
