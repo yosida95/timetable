@@ -7,7 +7,9 @@ import (
 	"log"
 	"os"
 
+	"github.com/yosida95/timetable"
 	"github.com/yosida95/timetable/agqr"
+	"github.com/yosida95/timetable/qrr"
 )
 
 var (
@@ -42,16 +44,19 @@ func main() {
 	}
 	filter := query.Filter()
 
-	prog, err := agqr.BuildTimetable()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for prog != nil {
-		if filter.Match(prog) {
-			fmt.Println(prog.Cron(cronTmpl))
+	for _, fun := range []func() (*timetable.Program, error){
+		agqr.BuildTimetable,
+		qrr.BuildTimetable,
+	} {
+		prog, err := fun()
+		if err != nil {
+			log.Fatal(err)
 		}
-
-		prog = prog.Next
+		for prog != nil {
+			if filter.Match(prog) {
+				fmt.Println(prog.Cron(cronTmpl))
+			}
+			prog = prog.Next
+		}
 	}
 }
